@@ -2,7 +2,7 @@ import { dialog } from 'electron';
 import prompt from 'custom-electron-prompt';
 import { deepmerge } from 'deepmerge-ts';
 
-import { downloadPlaylist } from './main';
+import { downloadPlaylist, downloadArtist } from './main';
 import { getFolder } from './main/utils';
 import { DefaultPresetList } from './types';
 
@@ -182,6 +182,10 @@ export const onMenu = async ({
     {
       label: t('plugins.downloader.menu.download-playlist'),
       click: () => downloadPlaylist(),
+    },
+    {
+      label: t('plugins.downloader.menu.download-artist'),
+      click: () => downloadArtist(),
     },
     {
       label: t('plugins.downloader.menu.choose-download-folder'),

@@ -224,6 +224,9 @@ export const onMainLoad = async ({
   ipc.handle('download-playlist-request', async (url: string) =>
     downloadPlaylist(url),
   );
+  ipc.handle('download-artist-request', async (url: string) =>
+    downloadArtist(url),
+  );
 
   downloadSongOnFinishSetup({ ipc, getConfig });
 };
@@ -271,6 +274,164 @@ export async function downloadSongFromId(
     );
   } catch (error: unknown) {
     sendError(error as Error, resolvedName || id);
+  }
+}
+
+export async function downloadArtist(artistUrl?: string | URL) {
+  try {
+    artistUrl = new URL(artistUrl ?? '');
+  } catch {
+    artistUrl = new URL(win.webContents.getURL());
+  }
+
+  const artistId = getArtistID(artistUrl);
+
+  if (!artistId) {
+    sendError(
+      new Error(t('plugins.downloader.backend.feedback.artist-id-not-found')),
+    );
+    return;
+  }
+
+  const sendFeedback = (message?: unknown) => sendFeedback_(win, message);
+
+  console.log(
+    t('plugins.downloader.backend.feedback.trying-to-get-artist-info', {
+      artistId,
+    }),
+  );
+  sendFeedback(t('plugins.downloader.backend.feedback.getting-artist-info'));
+
+  let artist: YTMusic.Artist;
+  try {
+    artist = await yt.music.getArtist(artistId);
+  } catch (error: unknown) {
+    sendError(
+      Error(
+        t('plugins.downloader.backend.feedback.artist-not-found', {
+          error: String(error),
+        }),
+      ),
+    );
+    return;
+  }
+
+  if (!artist || !artist.songs || artist.songs.length === 0) {
+    sendError(
+      new Error(t('plugins.downloader.backend.feedback.artist-has-no-songs')),
+    );
+    return;
+  }
+
+  const normalArtistTitle =
+    artist.header && 'title' in artist.header
+      ? artist.header?.title?.text
+      : undefined;
+  const artistTitle =
+    normalArtistTitle ??
+    artist.page.contents_memo
+      ?.get('MusicResponsiveListItemFlexColumn')
+      ?.at(0)
+      ?.as(YTNodes.MusicResponsiveListItemFlexColumn)?.title?.text ??
+    'NO_TITLE';
+
+  const folder = getFolder(config.downloadFolder ?? '');
+  const artistFolder = join(folder, artistTitle);
+  if (existsSync(artistFolder)) {
+    if (!config.skipExisting) {
+      sendError(
+        new Error(
+          t('plugins.downloader.backend.feedback.folder-already-exists', {
+            artistFolder,
+          }),
+        ),
+      );
+      return;
+    }
+  } else {
+    mkdirSync(artistFolder, { recursive: true });
+  }
+
+  dialog.showMessageBox(win, {
+    type: 'info',
+    buttons: [
+      t('plugins.downloader.backend.dialog.start-download-artist.buttons.ok'),
+    ],
+    title: t('plugins.downloader.backend.dialog.start-download-artist.title'),
+    message: t(
+      'plugins.downloader.backend.dialog.start-download-artist.message',
+      {
+        artistTitle,
+      },
+    ),
+    detail: t(
+      'plugins.downloader.backend.dialog.start-download-artist.detail',
+      {
+        artistSize: artist.songs.length,
+      },
+    ),
+  });
+
+  if (is.dev()) {
+    console.log(
+      t('plugins.downloader.backend.feedback.downloading-artist', {
+        artistTitle,
+        artistSize: artist.songs.length,
+        artistId,
+      }),
+    );
+  }
+
+  win.setProgressBar(2); // Starts with indefinite bar
+
+  setBadge(artist.songs.length);
+
+  let counter = 1;
+
+  const progressStep = 1 / artist.songs.length;
+
+  const increaseProgress = (itemPercentage: number) => {
+    const currentProgress = (counter - 1) / (artist.songs.length ?? 1);
+    const newProgress = currentProgress + progressStep * itemPercentage;
+    win.setProgressBar(newProgress);
+  };
+
+  try {
+    for (const song of artist.songs) {
+      sendFeedback(
+        t('plugins.downloader.backend.feedback.downloading-counter', {
+          current: counter,
+          total: artist.songs.length,
+        }),
+      );
+      const trackId = `${counter}/${artist.songs.length}`;
+      await downloadSongFromId(
+        song.id!,
+        artistFolder,
+        trackId,
+        increaseProgress,
+      ).catch((error) =>
+        sendError(
+          new Error(
+            t('plugins.downloader.backend.feedback.error-while-downloading', {
+              author: song.author!.name,
+              title: song.title!,
+              error: String(error),
+            }),
+          ),
+        ),
+      );
+
+      win.setProgressBar(counter / artist.songs.length);
+      setBadge(artist.songs.length - counter);
+      counter++;
+    }
+  } catch (error: unknown) {
+    sendError(error as Error);
+  } finally {
+    win.setProgressBar(-1); // Close progress bar
+    setBadge(0); // Close badge counter
+    sendFeedback(); // Clear feedback
   }
 }
 
@@ -988,6 +1149,16 @@ const getPlaylistID = (aURL?: URL): string | null | undefined => {
 
 const getVideoId = (url: URL | string): string | null => {
   return new URL(url).searchParams.get('v');
+};
+
+const getArtistID = (aURL?: URL): string | null | undefined => {
+  const result =
+    aURL?.searchParams.get('user') || aURL?.searchParams.get('channel');
+  if (result) {
+    return result;
+  }
+
+  return null;
 };
 
 const getMetadata = (info: YTMusic.TrackInfo): CustomSongInfo => ({

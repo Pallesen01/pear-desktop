@@ -312,8 +312,8 @@ function initTheme(win: BrowserWindow) {
 
   win.webContents.once('did-finish-load', () => {
     if (is.dev()) {
-      console.debug(LoggerPrefix, t('main.console.did-finish-load.dev-tools'));
-      win.webContents.openDevTools();
+      //console.debug(LoggerPrefix, t('main.console.did-finish-load.dev-tools'));
+      //win.webContents.openDevTools();
     }
   });
 }

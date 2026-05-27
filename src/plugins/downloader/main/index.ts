@@ -16,7 +16,7 @@ import {
 import is from 'electron-is';
 import filenamify from 'filenamify';
 import { Mutex } from 'async-mutex';
-import * as NodeID3 from 'node-id3';
+import NodeID3 from 'node-id3';
 import { BG, type BgConfig } from 'bgutils-js';
 import lazyVar from 'lazy-var';
 
@@ -43,7 +43,12 @@ import type { DownloaderPluginConfig } from '../index';
 import type { BackendContext } from '@/types/contexts';
 import type { GetPlayerResponse } from '@/types/get-player-response';
 
-type CustomSongInfo = SongInfo & { trackId?: string };
+type CustomSongInfo = SongInfo & {
+  trackId?: string;
+  description?: string;
+  startTimestamp?: string | Date;
+  category?: string;
+};
 
 const ffmpeg = lazyVar.lazy(async () =>
   (await import('@ffmpeg.wasm/main')).createFFmpeg({
@@ -599,14 +604,25 @@ async function writeID3(
     sendFeedback(t('plugins.downloader.backend.feedback.writing-id3'));
     const tags: NodeID3.Tags = {};
 
-    // Create the metadata tags
+    // Standard basic tags
     tags.title = metadata.title;
     tags.artist = metadata.artist;
+    tags.performerInfo = metadata.artist; // Album Artist
 
     if (metadata.album) {
       tags.album = metadata.album;
     }
 
+    // Comment tag
+    tags.comment = {
+      language: 'eng',
+      text: `https://www.youtube.com/watch?v=${metadata.videoId}`,
+    };
+
+    // Encoder
+    tags.encodedBy = 'Pear Music Downloader';
+
+    // Cover art
     const coverBuffer = await getCoverBuffer(metadata.imageSrc ?? '');
     if (coverBuffer) {
       tags.image = {
@@ -619,9 +635,131 @@ async function writeID3(
       };
     }
 
+    // Disc & Track info
     if (metadata.trackId) {
       tags.trackNumber = metadata.trackId;
+      // Set partOfSet (Disc number / Total discs)
+      tags.partOfSet = '1/1';
     }
+
+    // Sort tags
+    tags.performerSortOrder = metadata.artist; // TSOP
+    tags.titleSortOrder = metadata.title; // TSOT
+    if (metadata.album) {
+      tags.albumSortOrder = metadata.album; // TSOA
+    }
+
+    // Raw tags (including Album Artist Sort)
+    tags.raw = {
+      TSO2: metadata.artist,
+    };
+
+    // Parser for descriptions
+    const desc = metadata.description || '';
+
+    // 1. Parse Release Date / Year
+    let releaseDate = '';
+    const releaseDateMatch = desc.match(/(?:Released on|Release Date):\s*(\d{4}[-/]\d{2}[-/]\d{2})/i);
+    if (releaseDateMatch) {
+      releaseDate = releaseDateMatch[1].replace(/\//g, '-');
+    } else if (metadata.startTimestamp) {
+      try {
+        releaseDate = new Date(metadata.startTimestamp).toISOString().split('T')[0];
+      } catch {}
+    }
+
+    if (releaseDate) {
+      tags.releaseTime = releaseDate;
+      tags.originalReleaseTime = releaseDate;
+      tags.recordingTime = releaseDate;
+      const year = releaseDate.split('-')[0];
+      if (year) {
+        tags.year = year;
+        tags.originalYear = year;
+      }
+    }
+
+    // 2. Parse Publisher / Record Label
+    let publisher = '';
+    const publisherMatch = desc.match(/Music Publisher:\s*(.+)/i);
+    const pLineMatch = desc.match(/℗\s*\d{4}\s*(.+)/i);
+    const providedByMatch = desc.match(/Provided to YouTube by\s*(.+)/i);
+    if (publisherMatch) {
+      publisher = publisherMatch[1].trim();
+    } else if (pLineMatch) {
+      publisher = pLineMatch[1].trim();
+    } else if (providedByMatch) {
+      publisher = providedByMatch[1].trim();
+    } else {
+      publisher = metadata.artist;
+    }
+
+    if (publisher) {
+      tags.publisher = publisher;
+    }
+
+    // Copyright lines
+    const copyrightMatch = desc.match(/(℗\s*\d{4}\s*.+)/i);
+    if (copyrightMatch) {
+      tags.copyright = copyrightMatch[1].trim();
+    } else if (publisher) {
+      const year = (releaseDate ? releaseDate.split('-')[0] : '') || new Date().getFullYear().toString();
+      tags.copyright = `℗ ${year} ${publisher}`;
+    }
+
+    // 3. Parse Composer
+    const composerMatch = desc.match(/Composer:\s*(.+)/i);
+    if (composerMatch) {
+      tags.composer = composerMatch[1].trim();
+    }
+
+    // 4. Parse Lyricist / Text Writer
+    const lyricistMatch = desc.match(/(?:Lyricist|Writer|Lyrics):\s*(.+)/i);
+    if (lyricistMatch) {
+      tags.textWriter = lyricistMatch[1].trim();
+    }
+
+    // Custom user-defined TXXX tags
+    const userDefinedText: Array<{ description: string; value: string }> = [];
+
+    // Media
+    userDefinedText.push({ description: 'MEDIA', value: 'Digital Media' });
+    userDefinedText.push({ description: 'Media', value: 'Digital Media' });
+
+    // Release Status
+    userDefinedText.push({ description: 'MusicBrainz Album Status', value: 'official' });
+    userDefinedText.push({ description: 'Release Status', value: 'official' });
+
+    // Release Type
+    let releaseType = 'single';
+    if (metadata.album && metadata.album.toLowerCase() !== metadata.title.toLowerCase()) {
+      releaseType = 'album';
+    }
+    userDefinedText.push({ description: 'MusicBrainz Album Type', value: releaseType });
+    userDefinedText.push({ description: 'Release Type', value: releaseType });
+
+    // Release Country
+    userDefinedText.push({ description: 'MusicBrainz Album Release Country', value: 'XW' });
+    userDefinedText.push({ description: 'Release Country', value: 'XW' });
+
+    // Script
+    userDefinedText.push({ description: 'Script', value: 'Latn' });
+
+    // Sort order tags
+    userDefinedText.push({ description: 'ALBUMARTISTSORT', value: metadata.artist });
+    userDefinedText.push({ description: 'ARTISTSORT', value: metadata.artist });
+    userDefinedText.push({ description: 'TITLESORT', value: metadata.title });
+    if (metadata.album) {
+      userDefinedText.push({ description: 'ALBUMSORT', value: metadata.album });
+    }
+
+    // Barcode: check if we can find UPC/EAN in description (12 or 13 digits)
+    const barcodeMatch = desc.match(/\b\d{12,13}\b/);
+    if (barcodeMatch) {
+      userDefinedText.push({ description: 'BARCODE', value: barcodeMatch[0] });
+    }
+
+    tags.userDefinedText = userDefinedText;
 
     return NodeID3.write(tags, buffer);
   } catch (error: unknown) {
@@ -791,11 +929,11 @@ export async function downloadPlaylist(givenUrl?: string | URL) {
           total: items.length,
         }),
       );
-      const trackId = isAlbum ? counter : undefined;
+      const trackId = `${counter}/${items.length}`;
       await downloadSongFromId(
         song.id!,
         playlistFolder,
-        trackId?.toString(),
+        trackId,
         increaseProgress,
       ).catch((error) =>
         sendError(
@@ -864,6 +1002,9 @@ const getMetadata = (info: YTMusic.TrackInfo): CustomSongInfo => ({
   views: info.basic_info.view_count!,
   songDuration: info.basic_info.duration!,
   mediaType: MediaType.Audio,
+  description: info.basic_info.short_description || (info.basic_info as any).description,
+  startTimestamp: (info.basic_info as any).start_timestamp || (info as any).microformat?.publish_date || (info as any).microformat?.upload_date,
+  category: (info.basic_info as any).category,
 });
 
 // This is used to bypass age restrictions

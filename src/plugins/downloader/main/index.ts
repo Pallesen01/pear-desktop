@@ -249,7 +249,14 @@ export async function downloadSong(
       increasePlaylistProgress,
     );
   } catch (error: unknown) {
-    sendError(error as Error, resolvedName || url);
+    // Only show error popup for direct user-triggered downloads,
+    // not for download-on-finish mode (playlist downloads)
+    if (!playlistFolder && !trackId) {
+      sendError(error as Error, resolvedName || url);
+    } else {
+      // Log silently for download-on-finish failures
+      console.error('Download-on-finish error:', error);
+    }
   }
 }
 
@@ -289,35 +296,72 @@ function downloadSongOnFinishSetup({
       if (elapsedSeconds > time) time = elapsedSeconds;
       return;
     }
+    // Check if this is a new song (URL changed) and download-on-finish is enabled
     if (
       !songInfo.isPaused &&
       songInfo.url !== currentUrl &&
       config.downloadOnFinish?.enabled
     ) {
+      console.log(
+        '[DownloadOnFinish] New song detected:',
+        songInfo.title || songInfo.url,
+      );
+      console.log(
+        '[DownloadOnFinish] Current URL:',
+        currentUrl,
+        'Duration:',
+        duration,
+        'Time elapsed:',
+        time,
+      );
+      console.log(
+        '[DownloadOnFinish] Config - Mode:',
+        config.downloadOnFinish.mode,
+        'Seconds:',
+        config.downloadOnFinish.seconds,
+        'Percent:',
+        config.downloadOnFinish.percent,
+      );
+
+      // Only trigger download if we have duration data from previous song
       if (typeof currentUrl === 'string' && duration && duration > 0) {
-        if (
-          config.downloadOnFinish.mode === 'seconds' &&
-          duration - time <= config.downloadOnFinish.seconds
-        ) {
-          downloadSong(
-            currentUrl,
-            config.downloadOnFinish.folder ??
-              config.downloadFolder ??
-              defaultDownloadFolder,
-          );
-        } else if (
-          config.downloadOnFinish.mode === 'percent' &&
-          time >= duration * (config.downloadOnFinish.percent / 100)
-        ) {
-          downloadSong(
-            currentUrl,
-            config.downloadOnFinish.folder ??
-              config.downloadFolder ??
-              defaultDownloadFolder,
-          );
+        let shouldDownload = false;
+        let reason = '';
+
+        if (config.downloadOnFinish.mode === 'seconds') {
+          const secondsLeft = duration - time;
+          shouldDownload = secondsLeft <= config.downloadOnFinish.seconds;
+          reason = `${secondsLeft.toFixed(1)}s <= ${config.downloadOnFinish.seconds}s threshold`;
+        } else if (config.downloadOnFinish.mode === 'percent') {
+          const percentPlayed = (time / duration) * 100;
+          shouldDownload = percentPlayed >= config.downloadOnFinish.percent;
+          reason = `${percentPlayed.toFixed(1)}% >= ${config.downloadOnFinish.percent}% threshold`;
         }
+
+        if (shouldDownload) {
+          console.log(
+            '[DownloadOnFinish] Triggering download for:',
+            songInfo.title || songInfo.url,
+            reason,
+          );
+          downloadSong(
+            currentUrl,
+            config.downloadOnFinish.folder ??
+              config.downloadFolder ??
+              defaultDownloadFolder,
+          );
+        } else {
+          console.log('[DownloadOnFinish] Download not triggered:', reason);
+        }
+      } else {
+        console.log(
+          '[DownloadOnFinish] Skipping - missing duration data',
+          currentUrl,
+          duration,
+        );
       }
 
+      // Reset timer for new song
       currentUrl = songInfo.url;
       duration = songInfo.songDuration;
       time = 0;
@@ -651,7 +695,7 @@ async function writeID3(
 
     // Raw tags (including Album Artist Sort)
     tags.raw = {
-      TSO2: metadata.artist,
+      [metadata.artist]: '1',
     };
 
     // Parser for descriptions
@@ -659,12 +703,16 @@ async function writeID3(
 
     // 1. Parse Release Date / Year
     let releaseDate = '';
-    const releaseDateMatch = desc.match(/(?:Released on|Release Date):\s*(\d{4}[-/]\d{2}[-/]\d{2})/i);
+    const releaseDateMatch = desc.match(
+      /(?:Released on|Release Date):\s*(\d{4}[-/]\d{2}[-/]\d{2})/i,
+    );
     if (releaseDateMatch) {
       releaseDate = releaseDateMatch[1].replace(/\//g, '-');
     } else if (metadata.startTimestamp) {
       try {
-        releaseDate = new Date(metadata.startTimestamp).toISOString().split('T')[0];
+        releaseDate = new Date(metadata.startTimestamp)
+          .toISOString()
+          .split('T')[0];
       } catch {}
     }
 
@@ -703,7 +751,9 @@ async function writeID3(
     if (copyrightMatch) {
       tags.copyright = copyrightMatch[1].trim();
     } else if (publisher) {
-      const year = (releaseDate ? releaseDate.split('-')[0] : '') || new Date().getFullYear().toString();
+      const year =
+        (releaseDate ? releaseDate.split('-')[0] : '') ||
+        new Date().getFullYear().toString();
       tags.copyright = `℗ ${year} ${publisher}`;
     }
 
@@ -727,26 +777,41 @@ async function writeID3(
     userDefinedText.push({ description: 'Media', value: 'Digital Media' });
 
     // Release Status
-    userDefinedText.push({ description: 'MusicBrainz Album Status', value: 'official' });
+    userDefinedText.push({
+      description: 'MusicBrainz Album Status',
+      value: 'official',
+    });
     userDefinedText.push({ description: 'Release Status', value: 'official' });
 
     // Release Type
     let releaseType = 'single';
-    if (metadata.album && metadata.album.toLowerCase() !== metadata.title.toLowerCase()) {
+    if (
+      metadata.album &&
+      metadata.album.toLowerCase() !== metadata.title.toLowerCase()
+    ) {
       releaseType = 'album';
     }
-    userDefinedText.push({ description: 'MusicBrainz Album Type', value: releaseType });
+    userDefinedText.push({
+      description: 'MusicBrainz Album Type',
+      value: releaseType,
+    });
     userDefinedText.push({ description: 'Release Type', value: releaseType });
 
     // Release Country
-    userDefinedText.push({ description: 'MusicBrainz Album Release Country', value: 'XW' });
+    userDefinedText.push({
+      description: 'MusicBrainz Album Release Country',
+      value: 'XW',
+    });
     userDefinedText.push({ description: 'Release Country', value: 'XW' });
 
     // Script
     userDefinedText.push({ description: 'Script', value: 'Latn' });
 
     // Sort order tags
-    userDefinedText.push({ description: 'ALBUMARTISTSORT', value: metadata.artist });
+    userDefinedText.push({
+      description: 'ALBUMARTISTSORT',
+      value: metadata.artist,
+    });
     userDefinedText.push({ description: 'ARTISTSORT', value: metadata.artist });
     userDefinedText.push({ description: 'TITLESORT', value: metadata.title });
     if (metadata.album) {
@@ -834,7 +899,6 @@ export async function downloadPlaylist(givenUrl?: string | URL) {
       ?.at(2)
       ?.as(YTNodes.MusicResponsiveListItemFlexColumn)?.title?.text ??
     'NO_TITLE';
-  const isAlbum = !normalPlaylistTitle;
 
   while (playlist.has_continuation) {
     playlist = await playlist.getContinuation();
@@ -1002,9 +1066,14 @@ const getMetadata = (info: YTMusic.TrackInfo): CustomSongInfo => ({
   views: info.basic_info.view_count!,
   songDuration: info.basic_info.duration!,
   mediaType: MediaType.Audio,
-  description: info.basic_info.short_description || (info.basic_info as any).description,
-  startTimestamp: (info.basic_info as any).start_timestamp || (info as any).microformat?.publish_date || (info as any).microformat?.upload_date,
-  category: (info.basic_info as any).category,
+  description:
+    info.basic_info.short_description ?? info.basic_info.description ?? '',
+  startTimestamp:
+    info.basic_info.start_timestamp ??
+    info.microformat?.publish_date ??
+    info.microformat?.upload_date ??
+    '',
+  category: info.basic_info.category ?? '',
 });
 
 // This is used to bypass age restrictions

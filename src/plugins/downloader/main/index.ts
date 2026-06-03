@@ -1066,13 +1066,7 @@ const getMetadata = (info: YTMusic.TrackInfo): CustomSongInfo => ({
   views: info.basic_info.view_count!,
   songDuration: info.basic_info.duration!,
   mediaType: MediaType.Audio,
-  description:
-    info.basic_info.short_description ?? info.basic_info.description ?? '',
-  startTimestamp:
-    info.basic_info.start_timestamp ??
-    info.microformat?.publish_date ??
-    info.microformat?.upload_date ??
-    '',
+
   category: info.basic_info.category ?? '',
 });
 
